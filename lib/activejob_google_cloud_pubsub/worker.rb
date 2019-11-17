@@ -9,11 +9,14 @@ module ActiveJob
   module GoogleCloudPubsub
     class Worker
       using PubsubExtension
+      MAX_DEDUPLICATION_ITEMS = 1000
 
       def initialize(queue: 'default', pubsub: Google::Cloud::Pubsub.new(timeout: 60), logger: Logger.new($stdout))
         @queue_name  = queue
         @pubsub      = pubsub
         @logger      = logger
+        @deduplication_queue = Queue.new
+        @deduplication_set = Set.new
       end
 
       def run
@@ -38,7 +41,7 @@ module ActiveJob
         Signal.trap(:INT) do
           @quit = true
         end
-        
+
         subscriber.start
 
         until @quit
@@ -58,6 +61,8 @@ module ActiveJob
       private
 
       def process(message)
+        return if @deduplication_set.include?(message.message_id)
+
         timer_opts = {
           # Extend ack deadline when only 10% of allowed time or 5 seconds are left, whichever comes first
           execution_interval: [(@ack_deadline * 0.9).round, @ack_deadline - 5].min.seconds,
@@ -85,6 +90,13 @@ module ActiveJob
           if succeeded || failed
             message.acknowledge!
             @logger&.info "Message(#{message.message_id}) was acknowledged."
+
+            @deduplication_set.add(message.message_id)
+            @deduplication_queue.push(message.message_id)
+            if @deduplication_queue.length > MAX_DEDUPLICATION_ITEMS
+              oldest_message_id = @deduplication_queue.pop
+              @deduplication_set.delete(oldest_message_id)
+            end
           else
             # terminated from outside
             message.reject!
