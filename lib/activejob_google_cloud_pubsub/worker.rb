@@ -61,7 +61,10 @@ module ActiveJob
       private
 
       def process(message)
-        return if @deduplication_set.include?(message.message_id)
+        if @deduplication_set.include?(message.message_id)
+          message.acknowledge!
+          return
+        end
 
         timer_opts = {
           # Extend ack deadline when only 10% of allowed time or 5 seconds are left, whichever comes first
